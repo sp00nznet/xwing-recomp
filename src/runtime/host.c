@@ -1,4 +1,4 @@
-/*
+﻿/*
  * X-Wing (Windows 95, Steam) - static recompilation host.
  *
  * A 32-bit host on pcrecomp's runtime/native32 (the native bridge, callbacks
@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "native32.h"
 #include "recomp_trace.h"
@@ -39,8 +40,8 @@ static int   g_fullscreen;   /* --fullscreen: no always-active window */
 /* --shot SECONDS FILE: the next frame after SECONDS, read from the back
  * buffer in Present (hook_Present), as a .bmp. --shot can be given more than
  * once. A frame count is printed every five seconds. */
-static DWORD g_shot_s[8];
-static char  g_shot_file[8][MAX_PATH];
+static DWORD g_shot_s[16];
+static char  g_shot_file[16][MAX_PATH];
 static int   g_shots, g_shot_next;
 static HWND g_game_wnd;      /* the game's window */
 static DWORD WINAPI shot_thread(LPVOID unused) {
@@ -359,6 +360,139 @@ static void shim_DirectDrawCreate(void) {
     g_esp += 4 + 3 * 4;
 }
 
+/* ---- scripted input (--keys) ---------------------------------------------------
+ * "SECONDS:what,..." where what is a key name (esc, enter, space, up, down,
+ * left, right, tab, f1..f10, a letter or digit), "click:X:Y" (game pixels,
+ * 640x480) or "move:X:Y". A key is held for 150 ms. While a script runs, the
+ * real keyboard and mouse are not read: only the script reaches the game. */
+typedef struct { DWORD at; int dik, vk, x, y, click, move; } step_t;
+static step_t g_steps[128];
+static int g_nsteps, g_scripted;
+static volatile DWORD g_key_until[256];      /* DIK code -> tick it is held until */
+static volatile DWORD g_vk_until[256];       /* the same, by virtual key */
+/* Key presses and releases for buffered reads (GetDeviceData). */
+static CRITICAL_SECTION g_evq_lock;
+static struct { DWORD ofs, data; } g_evq[64];
+static int g_evq_n;
+static void evq_push(DWORD dik, DWORD data) {
+    EnterCriticalSection(&g_evq_lock);
+    if (g_evq_n < 64) { g_evq[g_evq_n].ofs = dik; g_evq[g_evq_n].data = data; g_evq_n++; }
+    LeaveCriticalSection(&g_evq_lock);
+}
+static volatile LONG g_cur_x = 320, g_cur_y = 240;
+static volatile DWORD g_button_until;
+
+static const struct { const char* n; int dik, vk; } g_keynames[] = {
+    { "esc", 0x01, VK_ESCAPE }, { "enter", 0x1C, VK_RETURN }, { "space", 0x39, VK_SPACE },
+    { "tab", 0x0F, VK_TAB }, { "up", 0xC8, VK_UP }, { "down", 0xD0, VK_DOWN },
+    { "left", 0xCB, VK_LEFT }, { "right", 0xCD, VK_RIGHT }, { "bksp", 0x0E, VK_BACK },
+    { "f1", 0x3B, VK_F1 }, { "f2", 0x3C, VK_F2 }, { "f3", 0x3D, VK_F3 }, { "f4", 0x3E, VK_F4 },
+    { "f5", 0x3F, VK_F5 }, { "f6", 0x40, VK_F6 }, { "f7", 0x41, VK_F7 }, { "f8", 0x42, VK_F8 },
+    { "f9", 0x43, VK_F9 }, { "f10", 0x44, VK_F10 },
+};
+static const char g_dik_letters[] = "qwertyuiop\0\0\0\0asdfghjkl\0\0\0\0\0zxcvbnm";   /* from 0x10 */
+
+static int key_by_name(const char* n, int* vk) {
+    for (int i = 0; i < (int)(sizeof g_keynames / sizeof g_keynames[0]); i++)
+        if (!_stricmp(n, g_keynames[i].n)) { *vk = g_keynames[i].vk; return g_keynames[i].dik; }
+    if (n[0] && !n[1]) {
+        char c = (char)tolower((unsigned char)n[0]);
+        if (c >= '1' && c <= '9') { *vk = c; return 0x02 + (c - '1'); }
+        if (c == '0') { *vk = '0'; return 0x0B; }
+        for (int i = 0; i < (int)sizeof g_dik_letters; i++)
+            if (g_dik_letters[i] == c) { *vk = toupper((unsigned char)c); return 0x10 + i; }
+    }
+    return 0;
+}
+
+static void parse_keys(const char* spec) {
+    char buf[4096];
+    lstrcpynA(buf, spec, sizeof buf);
+    for (char* tok = strtok(buf, ","); tok && g_nsteps < 128; tok = strtok(NULL, ",")) {
+        step_t st = { 0 };
+        char* c = strchr(tok, ':');
+        if (!c) continue;
+        st.at = (DWORD)(atof(tok) * 1000);
+        char* what = c + 1;
+        if (!strncmp(what, "click:", 6) || !strncmp(what, "move:", 5)) {
+            st.click = what[0] == 'c';
+            st.move = 1;
+            sscanf(strchr(what, ':') + 1, "%d:%d", &st.x, &st.y);
+        } else if (!(st.dik = key_by_name(what, &st.vk))) {
+            fprintf(stderr, "--keys: unknown key \"%s\"\n", what);
+            exit(1);
+        }
+        g_steps[g_nsteps++] = st;
+    }
+    g_scripted = 1;
+}
+
+static DWORD WINAPI keys_thread(LPVOID unused) {
+    (void)unused;
+    DWORD t0 = GetTickCount();
+    for (int i = 0; i < g_nsteps; i++) {
+        step_t* st = &g_steps[i];
+        DWORD at = t0 + st->at, now = GetTickCount();
+        if ((int)(at - now) > 0) Sleep(at - now);
+        HWND w = g_game_wnd;
+        if (st->move) {
+            g_cur_x = st->x, g_cur_y = st->y;
+            if (w) PostMessageA(w, WM_MOUSEMOVE, 0, MAKELPARAM(st->x, st->y));
+            if (st->click) {
+                g_button_until = GetTickCount() + 150;
+                if (w) PostMessageA(w, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(st->x, st->y));
+                Sleep(150);
+                if (w) PostMessageA(w, WM_LBUTTONUP, 0, MAKELPARAM(st->x, st->y));
+            }
+            printf("[keys] %.1fs %s %d,%d\n", st->at / 1000.0, st->click ? "click" : "move", st->x, st->y);
+        } else {
+            g_key_until[st->dik] = g_vk_until[st->vk & 0xFF] = GetTickCount() + 150;
+            evq_push(st->dik, 0x80);
+            UINT sc = st->dik & 0x7F;
+            if (w) PostMessageA(w, WM_KEYDOWN, st->vk, 1 | (sc << 16));
+            Sleep(150);
+            if (w) PostMessageA(w, WM_KEYUP, st->vk, 1 | (sc << 16) | 0xC0000000u);
+            evq_push(st->dik, 0);
+            printf("[keys] %.1fs key %02X\n", st->at / 1000.0, st->dik);
+        }
+    }
+    return 0;
+}
+
+/* Posted key messages do not change the thread's key state, which the game
+ * reads too: the script's held keys are added (and, scripted, are all of it). */
+static void shim_GetKeyboardState(void) {
+    uint8_t* b = (uint8_t*)(uintptr_t)ARG(0);
+    BOOL r = TRUE;
+    if (g_scripted) memset(b, 0, 256);
+    else r = GetKeyboardState(b);
+    DWORD now = GetTickCount();
+    for (int i = 0; i < 256; i++)
+        if ((int)(g_vk_until[i] - now) > 0) b[i] |= 0x80;
+    g_eax = r;
+    g_esp += 4 + 1 * 4;
+}
+
+/* The cursor, in game pixels: the window's client area is the 640x480 mode
+ * (softdd sizes it). Scripted, it is wherever the script put it. */
+static void shim_GetCursorPos(void) {
+    POINT* pt = (POINT*)(uintptr_t)ARG(0);
+    if (g_scripted || !g_game_wnd) { pt->x = g_cur_x; pt->y = g_cur_y; }
+    else { GetCursorPos(pt); ScreenToClient(g_game_wnd, pt); }
+    g_eax = TRUE;
+    g_esp += 4 + 1 * 4;
+}
+static void shim_SetCursorPos(void) {
+    POINT pt = { (LONG)ARG(0), (LONG)ARG(1) };
+    g_cur_x = pt.x, g_cur_y = pt.y;
+    if (!g_scripted && g_game_wnd && GetForegroundWindow() == g_game_wnd) {
+        ClientToScreen(g_game_wnd, &pt);
+        SetCursorPos(pt.x, pt.y);
+    }
+    g_eax = TRUE;
+    g_esp += 4 + 2 * 4;
+}
+
 /* The game takes its devices exclusive and foreground, and Acquire fails
  * while another window is in front: devices are made background,
  * non-exclusive. IDirectInput::CreateDevice is slot 3, the device's
@@ -379,11 +513,62 @@ static HRESULT WINAPI hook_SetCooperativeLevel(void* dev, HWND w, DWORD flags) {
     if (!g_fullscreen) flags = 0x8 | 0x2;   /* DISCL_BACKGROUND | DISCL_NONEXCLUSIVE */
     return g_coop(dev, w, flags);
 }
+/* GetDeviceState (slot 9): the keyboard's 256 bytes and the mouse's buttons
+ * get the script's; scripted, the real devices are not read at all. */
+typedef HRESULT (WINAPI *state_t)(void*, DWORD, void*);
+static state_t g_state;
+static HRESULT WINAPI hook_GetDeviceState(void* dev, DWORD n, void* data) {
+    HRESULT hr = g_state(dev, n, data);
+    { static int seen[64]; if (n < 64 && !seen[n]++) printf("[di] GetDeviceState %lu bytes -> %08lX\n", n, hr); }
+    uint8_t* b = (uint8_t*)data;
+    DWORD now = GetTickCount();
+    if (g_scripted && hr == 0) memset(data, 0, n);
+    if (n == 256) {
+        for (int i = 0; i < 256; i++)
+            if ((int)(g_key_until[i] - now) > 0) b[i] = 0x80;
+        if (g_scripted) hr = 0;
+    } else if (n == 16 || n == 20) {          /* DIMOUSESTATE(2): lX lY lZ, buttons */
+        if ((int)(g_button_until - now) > 0) b[12] = 0x80;
+        if (g_scripted) hr = 0;
+    }
+    return hr;
+}
+
+typedef HRESULT (WINAPI *data_t)(void*, DWORD, void*, DWORD*, DWORD);
+static data_t g_data;
+static void* g_keyboard;   /* the keyboard device, for its buffered reads */
+static HRESULT WINAPI hook_GetDeviceData(void* dev, DWORD size, void* od, DWORD* n, DWORD flags) {
+    static int once;
+    static DWORD seq = 0x10000;
+    DWORD room = n ? *n : 0;
+    HRESULT hr = g_data(dev, size, od, n, flags);
+    if (!once++) printf("[di] GetDeviceData %lu-byte records -> %08lX\n", size, hr);
+    if (g_scripted && n) { *n = 0; hr = 0; }
+    /* The script's key events, after what the device had (DIDEVICEOBJECTDATA:
+     * offset, data, time, sequence). Only removed when they are read. */
+    if (dev == g_keyboard && n && od && size >= 16) {   /* a peek (DIGDD_PEEK) leaves them queued */
+        EnterCriticalSection(&g_evq_lock);
+        int k = 0;
+        while (k < g_evq_n && *n < room) {
+            DWORD* r = (DWORD*)((uint8_t*)od + *n * size);
+            r[0] = g_evq[k].ofs; r[1] = g_evq[k].data; r[2] = GetTickCount(); r[3] = seq++;
+            (*n)++, k++;
+        }
+        if (!(flags & 1)) { memmove(g_evq, g_evq + k, (g_evq_n - k) * sizeof g_evq[0]); g_evq_n -= k; }
+        LeaveCriticalSection(&g_evq_lock);
+    }
+    return hr;
+}
+
 static HRESULT WINAPI hook_DI_CreateDevice(void* di, const GUID* g, void** out, void* outer) {
     HRESULT hr = g_di_create_dev(di, g, out, outer);
     if (hr == 0 && *out) {
         void** vt = **(void****)out;
         if (vt[13] != (void*)hook_SetCooperativeLevel) g_coop = (coop_t)vt_hook(vt, 13, hook_SetCooperativeLevel);
+        if (vt[9] != (void*)hook_GetDeviceState) g_state = (state_t)vt_hook(vt, 9, hook_GetDeviceState);
+        if (vt[10] != (void*)hook_GetDeviceData) g_data = (data_t)vt_hook(vt, 10, hook_GetDeviceData);
+        printf("[di] CreateDevice {%08lX}\n", g->Data1);
+        if (g->Data1 == 0x6F1D2B61u) g_keyboard = *out;   /* GUID_SysKeyboard */
     }
     return hr;
 }
@@ -405,6 +590,9 @@ static void shim_DirectInputCreateA(void) {
 }
 
 static native32_shim_t g_shims[] = {
+    { "GetCursorPos", shim_GetCursorPos },
+    { "GetKeyboardState", shim_GetKeyboardState },
+    { "SetCursorPos", shim_SetCursorPos },
     { "DirectDrawCreate", shim_DirectDrawCreate },
     { "DirectInputCreateA", shim_DirectInputCreateA },
     { "joyGetNumDevs", shim_joyGetNumDevs },
@@ -550,13 +738,14 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--headless")) g_headless = softdd_headless = 1;
         else if (!strcmp(argv[i], "--fullscreen")) g_fullscreen = 1;
         else if (!strcmp(argv[i], "--sample")) g_sample = 1;
-        else if (!strcmp(argv[i], "--shot") && i + 2 < argc && g_shots < 8) {
+        else if (!strcmp(argv[i], "--shot") && i + 2 < argc && g_shots < 16) {
             g_shot_s[g_shots] = strtoul(argv[++i], NULL, 0);
             GetFullPathNameA(argv[++i], MAX_PATH, g_shot_file[g_shots++], NULL);
         }
         else if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
         else if (!strcmp(argv[i], "--game") && i + 1 < argc) game = argv[++i];
         else if (!strcmp(argv[i], "--args") && i + 1 < argc) _snprintf(guest_args, sizeof guest_args - 1, " %s", argv[++i]);
+        else if (!strcmp(argv[i], "--keys") && i + 1 < argc) parse_keys(argv[++i]);
         else if (!strcmp(argv[i], "--watchdog") && i + 1 < argc) g_watchdog_s = strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--callbacks")) native32_trace_callbacks = 1;
         else if (!strcmp(argv[i], "--native-trace")) native32_trace_native = 1;
@@ -600,6 +789,8 @@ int main(int argc, char** argv) {
     if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
     if (g_sample) CloseHandle(CreateThread(NULL, 0, sampler, NULL, 0, NULL));
     if (g_shots) CloseHandle(CreateThread(NULL, 0, shot_thread, NULL, 0, NULL));
+    InitializeCriticalSection(&g_evq_lock);
+    if (g_nsteps) CloseHandle(CreateThread(NULL, 0, keys_thread, NULL, 0, NULL));
     printf("  entering 0x%08X\n\n", xw_entry_va);
     native32_call_guest(xw_entry_va, 0, NULL);
     printf("\nentry returned eax=%08X\n", g_eax);

@@ -10,10 +10,13 @@ You supply your own copy of the game. Nothing from it is in this repo.
 
 ## Status
 
-**Early.** Boots and plays the intro: the Totally Games and Star Wars logos,
-then the opening crawl.
+**Early.** Boots, plays the whole intro (logos, crawl, the Star Destroyer
+cinematic) and reaches pilot registration. Keys and clicks work, from the
+player or from a `--keys` script.
 
 ![Intro](docs/screenshots/intro.png)
+![Intro cinematic](docs/screenshots/intro_cinematic.png)
+![Pilot registration](docs/screenshots/pilot_register.png)
 
 ## Step by step
 
@@ -43,6 +46,8 @@ then the opening crawl.
 
 ## Test switches
 
-`--watchdog S` ends the run after S seconds and answers message boxes itself.
+`--keys "10:esc,20:click:271:327,..."` sends keys (esc, enter, space, arrows,
+letters, f1-f10) and clicks in game pixels at the given seconds; while it runs
+the real keyboard and mouse are ignored. `--watchdog S` ends the run after S seconds and answers message boxes itself.
 `--shot S file.bmp` writes the frame presented after S seconds (only the
 game's own frame buffer, never the screen). `--sound` unmutes.
