@@ -15,7 +15,9 @@ concourse (tech room, film room, historical combat), plays the briefing and
 the launch cutscene, and flies Historical Combat mission 1 in the X-Wing
 cockpit with its HUD and textured TIE fighters, the 3D at the window's
 resolution. Keys, clicks and the virtual joystick work, from the player or
-from a `--keys` script. Not yet checked: sound, firing, and whole missions.
+from a `--keys` script. Sound plays (effects through DirectSound, music
+through MUSIC.dll); `--sound-log` counts it for runs nobody listens to. Not
+yet checked: whole missions.
 
 ![In flight, high-resolution 3D](docs/screenshots/flight_hires.png)
 ![Concourse](docs/screenshots/concourse.png)
@@ -81,4 +83,4 @@ resources) and later times count from there, `N:shot=file.bmp` takes a
 screenshot. While a script runs
 the real keyboard and mouse are ignored. `--watchdog S` ends the run after S seconds and answers message boxes itself.
 `--shot S file.bmp` writes the frame presented after S seconds (only the
-game's own frame buffer, never the screen). `--sound` unmutes.
+game's own frame buffer, never the screen). Test runs (a script or a watchdog) are muted; `--sound` unmutes them, `--sound-log` prints what the game played every five seconds.

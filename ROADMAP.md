@@ -11,10 +11,10 @@
       gpu.c already renders a wider 3D target when told the gain.
 - [ ] OPT conversion (X-Wing vs. TIE Fighter's version 2, XWA's) to X-Wing's version 1, for upgraded craft
 - [ ] Concourse palette: the room behind the Options dialog shows in the dialog's colours
-- [ ] Confirm firing with the virtual joystick
+- [x] Firing with the virtual joystick (laser sounds play on fire)
 - [ ] Check on a real GPU (netlab): so far tested over RDP
 
 ## Game
-- [ ] Sound (muted in test runs; not yet listened to)
+- [x] Sound: effects and music play (measured with --sound-log; not yet listened to)
 - [ ] A whole mission flown; the campaign (Tour of Duty)
 - [ ] TIE Fighter (TIE95.EXE, same engine) on this host

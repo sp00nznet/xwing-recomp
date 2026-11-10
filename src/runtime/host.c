@@ -32,6 +32,7 @@
 #include "gpu.h"
 #include "settings.h"
 #include "flight.h"
+#include "sound.h"
 
 extern const uint32_t xw_entry_va;  /* recomp_dispatch.c */
 
@@ -690,7 +691,41 @@ static void shim_DirectInputCreateA(void) {
     g_esp += 4 + 4 * 4;
 }
 
+/* ---- sound: the real DirectSound and MUSIC.dll, counted (sound.c) ---- */
+static void shim_DirectSoundCreate(void) {
+    typedef HRESULT (WINAPI *create_t)(const GUID*, void**, void*);
+    static create_t create;
+    if (!create) create = (create_t)GetProcAddress(LoadLibraryA("dsound.dll"), "DirectSoundCreate");
+    void** out = (void**)(uintptr_t)ARG(1);
+    HRESULT hr;
+    UNLOCKED(hr = create((const GUID*)(uintptr_t)ARG(0), out, (void*)(uintptr_t)ARG(2)));
+    printf("[sound] DirectSoundCreate -> %08lX\n", hr);
+    if (hr == 0 && out && *out) sound_watch(*out);
+    g_eax = (uint32_t)hr;
+    g_esp += 4 + 3 * 4;
+}
+
+/* MUSIC.dll's mciSendCommandA (the CD-audio tracks, which this edition
+ * plays from XwingCD\music): logged, so a run says what music it asked for. */
+static void shim_mciSendCommandA(void) {
+    typedef MCIERROR (WINAPI *mci_t)(MCIDEVICEID, UINT, DWORD_PTR, DWORD_PTR);
+    static mci_t mci;
+    if (!mci) mci = (mci_t)GetProcAddress(GetModuleHandleA("music.dll"), "mciSendCommandA");
+    MCIERROR r;
+    UNLOCKED(r = mci(ARG(0), ARG(1), ARG(2), ARG(3)));
+    if (g_sound_log) printf("[sound] mci %u msg %04X flags %08X -> %u\n", ARG(0), ARG(1), ARG(2), (unsigned)r);
+    g_eax = r;
+    g_esp += 4 + 4 * 4;
+}
+
+static DWORD WINAPI sound_thread(LPVOID unused) {
+    (void)unused;
+    for (;;) { Sleep(5000); sound_report(); }
+}
+
 static native32_shim_t g_shims[] = {
+    { "DirectSoundCreate", shim_DirectSoundCreate },
+    { "mciSendCommandA", shim_mciSendCommandA },
     { "GetCursorPos", shim_GetCursorPos },
     { "GetKeyboardState", shim_GetKeyboardState },
     { "SetCursorPos", shim_SetCursorPos },
@@ -837,6 +872,7 @@ int main(int argc, char** argv) {
         if (n) { i += n - 1; continue; }
         if (!strcmp(argv[i], "--run")) run = 1;
         else if (!strcmp(argv[i], "--sound")) sound = 1;
+        else if (!strcmp(argv[i], "--sound-log")) g_sound_log = 1;
         else if (!strcmp(argv[i], "--headless")) g_headless = softdd_headless = 1;
         else if (!strcmp(argv[i], "--fullscreen")) g_gpu.fullscreen = 1;   /* borderless (F11) */
         else if (!strcmp(argv[i], "--windowed")) g_gpu.fullscreen = 0;
@@ -887,17 +923,20 @@ int main(int argc, char** argv) {
     if (!SetCurrentDirectoryA(game_full)) { fprintf(stderr, "cannot enter %s\n", game_full); return 1; }
     settings_apply_prefs();
     CoInitialize(NULL);
+    /* Playing: sound on. Test runs (a script or a watchdog) are muted unless --sound. */
+    if (!g_nsteps && !g_watchdog_s) sound = 1;
     int m = sound ? 1 : mute_process();
     if (!m) {
         fprintf(stderr, "cannot mute the process audio session; pass --sound to run with sound\n");
         return 1;
     }
-    printf("  audio: %s\n", sound ? "on (--sound)" : m == 2 ? "muted (no audio device)" : "muted (--sound to hear it)");
+    printf("  audio: %s\n", sound ? "on" : m == 2 ? "muted (no audio device)" : "muted (a test run; --sound to hear it)");
     if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
     if (g_sample) CloseHandle(CreateThread(NULL, 0, sampler, NULL, 0, NULL));
     if (g_shots) CloseHandle(CreateThread(NULL, 0, shot_thread, NULL, 0, NULL));
     InitializeCriticalSection(&g_evq_lock);
     g_file_seen = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (g_sound_log) CloseHandle(CreateThread(NULL, 0, sound_thread, NULL, 0, NULL));
     if (g_nsteps) CloseHandle(CreateThread(NULL, 0, keys_thread, NULL, 0, NULL));
     printf("  entering 0x%08X\n\n", xw_entry_va);
     native32_call_guest(xw_entry_va, 0, NULL);
