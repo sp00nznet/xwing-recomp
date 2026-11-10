@@ -438,9 +438,6 @@ static void parse_keys(const char* spec) {
         }
         g_steps[g_nsteps++] = st;
     }
-    for (int i = 0; i < g_nsteps; i++)
-        printf("  step %d: %s at %lu dik %02X %s\n", i, g_steps[i].on[0] ? g_steps[i].on : "-", g_steps[i].at,
-               g_steps[i].dik, g_steps[i].move ? "mouse" : "");
     g_scripted = 1;
 }
 

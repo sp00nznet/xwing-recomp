@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(_TOOLS, 'lift'))
 sys.path.insert(0, os.path.join(_TOOLS, 'pe'))
 
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32          # noqa: E402
+from capstone.x86 import X86_OP_MEM                        # noqa: E402
 from generate import (EXTENT_REACH, closure, find_splits, true_extent,  # noqa: E402
                       linear_disassemble_function, lift_function_linear, write_chunk)
 from lift32 import Lifter                                  # noqa: E402
@@ -73,6 +74,29 @@ def apply_patches(body, patches):
                 depth += body[s:e].count('{') - body[s:e].count('}')
             body = body[:e + 1] + '    ' + c + '\n' + body[e + 1:]
     return body
+
+
+def code_patches(md, code, cs, ce):
+    """Addresses inside .text that the module's own code stores to.
+
+    The 3D texture mapper patches its inner loops (from Gunman's driver):
+    `mov al, [eax+0x12345678]` ships with a placeholder that a setup routine
+    overwrites with the live colormap address (Gunman's sw.dll). Only
+    absolute stores are looked for -- that is the only form the patchers use.
+    """
+    from capstone import CS_AC_WRITE
+    md.skipdata = True
+    out = set()
+    for ins in md.disasm(code, cs):
+        if ins.id == 0 or not ins.operands:
+            continue
+        op = ins.operands[0]
+        if (op.type == X86_OP_MEM and op.access & CS_AC_WRITE
+                and op.mem.base == 0 and op.mem.index == 0
+                and cs <= (op.mem.disp & 0xFFFFFFFF) < ce):
+            out.add(op.mem.disp & 0xFFFFFFFF)
+    md.skipdata = False
+    return out
 
 
 def load_seeds(path):
@@ -148,7 +172,10 @@ def lift_module(path, catalog, args, out, extra_roots):
     # precise carry: adc/sbb take their carry from the flag state that set it.
     # The default reads a `_cf` that add/sub/cmp never write, which breaks every
     # 64-bit add and subtract (The Movies lost its menu video to it).
-    lifter = Lifter(iat_map=iat, lifted=set(byaddr), precise_carry=True, precise_sbb=True)
+    patches = code_patches(md, code, cs, ce)
+    print('[*]   %d self-modified code fields' % len(patches))
+    lifter = Lifter(iat_map=iat, lifted=set(byaddr), precise_carry=True, precise_sbb=True,
+                    patch_sites=patches)
     ordered = sorted(byaddr)
     starts = {a for a in ordered if byaddr[a].get('entry_kind') != 'alias'}
     splits = find_splits(md, code, cs, ce, starts)

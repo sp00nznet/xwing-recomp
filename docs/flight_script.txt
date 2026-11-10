@@ -1,0 +1,8 @@
+The test run that flies mission 1 (Historical Combat, X-Wing, Dev's Sidestep):
+
+build\xwingrecomp.exe --run --watchdog 120 --keys "on:lgmusic.lfd,1:space,on:regbrief.wav,2:s,2.5:p,3:0,3.5:0,4:n,4.5:z,6:enter,9:move:90:280,10:click:90:280,on:mainmenu.wav,2:move:320:140,3:click:320:140,on:combat.wav,12:move:580:250,13:click:580:250,on:waistem,4:move:610:150,5:click:610:150,on:XWINGP.PNL,14:shot=work/flight.bmp"
+
+Space skips the intro, the name is typed at registration (an existing pilot),
+the left door leaves for the concourse, the hangar window is Historical
+Combat, the right door the briefing, the right edge of the briefing room
+Enter Mission.
