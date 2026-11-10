@@ -723,7 +723,37 @@ static DWORD WINAPI sound_thread(LPVOID unused) {
     for (;;) { Sleep(5000); sound_report(); }
 }
 
+/* LoadIconA/LoadCursorA with the game's own instance: Windows would read the
+ * resource out of the mapped image, which is not laid out as a loaded module
+ * (TIE Fighter's cursor faulted in DefWindowProc). They come from the game's
+ * executable on disk, loaded as data; the standard ones if that fails. */
+static HMODULE game_resources(void) {
+    static HMODULE h;
+    if (!h) h = LoadLibraryExA(g_guest_exe, NULL, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    return h;
+}
+static void shim_LoadIconA(void) {
+    HINSTANCE inst = (HINSTANCE)(uintptr_t)ARG(0);
+    LPCSTR name = (LPCSTR)(uintptr_t)ARG(1);
+    HICON h = NULL;
+    if ((uint32_t)(uintptr_t)inst == IMAGE_BASE) { if (game_resources()) h = LoadIconA(game_resources(), name); if (!h) h = LoadIconA(NULL, IDI_APPLICATION); }
+    else h = LoadIconA(inst, name);
+    g_eax = (uint32_t)(uintptr_t)h;
+    g_esp += 4 + 2 * 4;
+}
+static void shim_LoadCursorA(void) {
+    HINSTANCE inst = (HINSTANCE)(uintptr_t)ARG(0);
+    LPCSTR name = (LPCSTR)(uintptr_t)ARG(1);
+    HCURSOR h = NULL;
+    if ((uint32_t)(uintptr_t)inst == IMAGE_BASE) { if (game_resources()) h = LoadCursorA(game_resources(), name); if (!h) h = LoadCursorA(NULL, IDC_ARROW); }
+    else h = LoadCursorA(inst, name);
+    g_eax = (uint32_t)(uintptr_t)h;
+    g_esp += 4 + 2 * 4;
+}
+
 static native32_shim_t g_shims[] = {
+    { "LoadIconA", shim_LoadIconA },
+    { "LoadCursorA", shim_LoadCursorA },
     { "DirectSoundCreate", shim_DirectSoundCreate },
     { "mciSendCommandA", shim_mciSendCommandA },
     { "GetCursorPos", shim_GetCursorPos },
