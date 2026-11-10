@@ -45,7 +45,7 @@ target_link_options(xwing PRIVATE /BASE:0x60000000 /FIXED:NO /DYNAMICBASE:NO
 set(GEN_OPT "/O2" CACHE STRING "optimisation for the generated C")
 set_source_files_properties(${GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "/w;${GEN_OPT}")
 set_source_files_properties(src/runtime/host.c PROPERTIES COMPILE_OPTIONS "/W3")
-target_link_libraries(xwing PRIVATE user32 gdi32 kernel32 ole32 uuid dxguid winmm ws2_32 dinput8 dxguid)
+target_link_libraries(xwing PRIVATE user32 gdi32 kernel32 ole32 uuid dxguid winmm ws2_32 dinput8 shlwapi)
 
 option(XW_TRACE "record a ring buffer of lifted function entries" OFF)
 if(XW_TRACE)

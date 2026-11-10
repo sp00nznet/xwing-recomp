@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <shlwapi.h>
 
 #include "native32.h"
 #include "recomp_trace.h"
@@ -198,6 +199,11 @@ static void shim_GetVolumeInformationA(void) {
     g_esp += 4 + 8 * 4;
 }
 
+/* "on:NAME" waits until the game opens a file whose name has NAME in it
+ * (a screen's resources), and the times after it count from then. */
+static char g_wait_file[64];
+static HANDLE g_file_seen;
+
 /* The game's file opens, logged: the milestones a run is read by. */
 static void shim_CreateFileA(void) {
     char buf[MAX_PATH * 2];
@@ -206,6 +212,7 @@ static void shim_CreateFileA(void) {
                                              ARG(4), ARG(5), (HANDLE)(uintptr_t)ARG(6));
     printf("[host] open %s -> %s\n", name ? name : "(null)",
            g_eax == (uint32_t)(uintptr_t)INVALID_HANDLE_VALUE ? "missing" : "ok");
+    if (g_wait_file[0] && name && StrStrIA(name, g_wait_file)) { g_wait_file[0] = 0; SetEvent(g_file_seen); }
     g_esp += 4 + 7 * 4;
 }
 
@@ -365,7 +372,8 @@ static void shim_DirectDrawCreate(void) {
  * left, right, tab, f1..f10, a letter or digit), "click:X:Y" (game pixels,
  * 640x480) or "move:X:Y". A key is held for 150 ms. While a script runs, the
  * real keyboard and mouse are not read: only the script reaches the game. */
-typedef struct { DWORD at; int dik, vk, x, y, click, move; } step_t;
+typedef struct { DWORD at; int dik, vk, x, y, click, move; char on[64], shot[MAX_PATH]; } step_t;
+
 static step_t g_steps[128];
 static int g_nsteps, g_scripted;
 static volatile DWORD g_key_until[256];      /* DIK code -> tick it is held until */
@@ -414,6 +422,12 @@ static void parse_keys(const char* spec) {
         if (!c) continue;
         st.at = (DWORD)(atof(tok) * 1000);
         char* what = c + 1;
+        if (!strncmp(tok, "on:", 3)) {
+            lstrcpynA(st.on, tok + 3, sizeof st.on);
+            g_steps[g_nsteps++] = st;
+            continue;
+        }
+        if (!strncmp(what, "shot=", 5)) { GetFullPathNameA(what + 5, MAX_PATH, st.shot, NULL); g_steps[g_nsteps++] = st; continue; }
         if (!strncmp(what, "click:", 6) || !strncmp(what, "move:", 5)) {
             st.click = what[0] == 'c';
             st.move = 1;
@@ -424,6 +438,9 @@ static void parse_keys(const char* spec) {
         }
         g_steps[g_nsteps++] = st;
     }
+    for (int i = 0; i < g_nsteps; i++)
+        printf("  step %d: %s at %lu dik %02X %s\n", i, g_steps[i].on[0] ? g_steps[i].on : "-", g_steps[i].at,
+               g_steps[i].dik, g_steps[i].move ? "mouse" : "");
     g_scripted = 1;
 }
 
@@ -432,8 +449,22 @@ static DWORD WINAPI keys_thread(LPVOID unused) {
     DWORD t0 = GetTickCount();
     for (int i = 0; i < g_nsteps; i++) {
         step_t* st = &g_steps[i];
+        if (st->on[0]) {
+            if (!st->x) { lstrcpynA(g_wait_file, st->on, sizeof g_wait_file); st->x = 1; }
+            WaitForSingleObject(g_file_seen, INFINITE);   /* armed here, or by the step before it */
+            t0 = GetTickCount();
+            printf("[keys] %s opened: times count from here\n", st->on);
+            continue;
+        }
+        /* The next wait listens from now: a key can open the screen it waits for. */
+        for (int j = i + 1; j < g_nsteps; j++)
+            if (g_steps[j].on[0]) {
+                if (!g_steps[j].x) { lstrcpynA(g_wait_file, g_steps[j].on, sizeof g_wait_file); g_steps[j].x = 1; }
+                break;
+            }
         DWORD at = t0 + st->at, now = GetTickCount();
         if ((int)(at - now) > 0) Sleep(at - now);
+        if (st->shot[0]) { softdd_shot(st->shot); continue; }
         HWND w = g_game_wnd;
         if (st->move) {
             g_cur_x = st->x, g_cur_y = st->y;
@@ -790,6 +821,7 @@ int main(int argc, char** argv) {
     if (g_sample) CloseHandle(CreateThread(NULL, 0, sampler, NULL, 0, NULL));
     if (g_shots) CloseHandle(CreateThread(NULL, 0, shot_thread, NULL, 0, NULL));
     InitializeCriticalSection(&g_evq_lock);
+    g_file_seen = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (g_nsteps) CloseHandle(CreateThread(NULL, 0, keys_thread, NULL, 0, NULL));
     printf("  entering 0x%08X\n\n", xw_entry_va);
     native32_call_guest(xw_entry_va, 0, NULL);
