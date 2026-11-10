@@ -1,0 +1,8 @@
+X-Wing recomp
+
+The host is derived from the Crazy Taxi recomp
+(https://github.com/sp00nznet/crazytaxi-recomp), and softdd.c from the
+Beavis and Butt-head in Virtual Stupidity recomp; both run on pcrecomp's
+native32 runtime (https://github.com/sp00nznet/pcrecomp), all MIT.
+
+Star Wars: X-Wing is (c) Lucasfilm Ltd. No part of the game is included.
