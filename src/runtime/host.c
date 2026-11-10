@@ -24,10 +24,13 @@
 #include <string.h>
 #include <ctype.h>
 #include <shlwapi.h>
+#include <windowsx.h>
 
 #include "native32.h"
 #include "recomp_trace.h"
 #include "softdd.h"
+#include "gpu.h"
+#include "settings.h"
 
 extern const uint32_t xw_entry_va;  /* recomp_dispatch.c */
 
@@ -261,11 +264,34 @@ static void shim_ShowWindow(void) {
 /* The game pauses (draws nothing) while its window is inactive. Windowed, it
  * is told it is always active, as HotD 1's online play does. */
 static WNDPROC g_game_proc;
+static int g_scripted;   /* --keys (below) */
 static LRESULT CALLBACK host_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_ACTIVATEAPP: case WM_NCACTIVATE: w = TRUE; break;
     case WM_ACTIVATE: w = MAKEWPARAM(WA_ACTIVE, HIWORD(w)); break;
     case WM_KILLFOCUS: return 0;
+    /* the presenter's: the window is the player's to size */
+    case WM_SIZE: gpu_resize(); return 0;
+    case WM_WINDOWPOSCHANGING: case WM_WINDOWPOSCHANGED: case WM_GETMINMAXINFO:
+    case WM_NCCALCSIZE: case WM_STYLECHANGED: case WM_STYLECHANGING:
+        return DefWindowProcA(h, m, w, l);
+    case WM_ERASEBKGND: return 1;
+    case WM_KEYDOWN: case WM_SYSKEYDOWN:
+        if (settings_key(h, (UINT)w, m == WM_SYSKEYDOWN)) return 0;
+        break;
+    case WM_SYSKEYUP: if (w == VK_F10) return 0; break;
+    case WM_SYSCHAR: if (w == VK_RETURN) return 0; break;
+    case WM_RBUTTONUP: {   /* outside the picture: the settings menu */
+        POINT p = { GET_X_LPARAM(l), GET_Y_LPARAM(l) }, q = p;
+        if (gpu_ready() && !gpu_to_game(&q)) { settings_menu(h, p.x, p.y); return 0; }
+        break;
+    }
+    }
+    /* mouse messages carry window pixels; the game expects its 640x480 */
+    if (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST && m != WM_MOUSEWHEEL && gpu_ready() && !g_scripted) {
+        POINT p = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+        gpu_to_game(&p);
+        l = MAKELPARAM(p.x, p.y);
     }
     return CallWindowProcA(g_game_proc, h, m, w, l);
 }
@@ -506,7 +532,7 @@ static void shim_GetKeyboardState(void) {
 static void shim_GetCursorPos(void) {
     POINT* pt = (POINT*)(uintptr_t)ARG(0);
     if (g_scripted || !g_game_wnd) { pt->x = g_cur_x; pt->y = g_cur_y; }
-    else { GetCursorPos(pt); ScreenToClient(g_game_wnd, pt); }
+    else { GetCursorPos(pt); ScreenToClient(g_game_wnd, pt); gpu_to_game(pt); }
     g_eax = TRUE;
     g_esp += 4 + 1 * 4;
 }
@@ -514,6 +540,7 @@ static void shim_SetCursorPos(void) {
     POINT pt = { (LONG)ARG(0), (LONG)ARG(1) };
     g_cur_x = pt.x, g_cur_y = pt.y;
     if (!g_scripted && g_game_wnd && GetForegroundWindow() == g_game_wnd) {
+        gpu_from_game(&pt);
         ClientToScreen(g_game_wnd, &pt);
         SetCursorPos(pt.x, pt.y);
     }
@@ -572,6 +599,16 @@ static HRESULT WINAPI hook_GetDeviceData(void* dev, DWORD size, void* od, DWORD*
     HRESULT hr = g_data(dev, size, od, n, flags);
     if (!once++) printf("[di] GetDeviceData %lu-byte records -> %08lX\n", size, hr);
     if (g_scripted && n) { *n = 0; hr = 0; }
+    if (dev == g_keyboard && n && od && size >= 16 && !g_scripted) {   /* F10-F12 are the host's */
+        DWORD k = 0;
+        for (DWORD i = 0; i < *n; i++) {
+            DWORD ofs = *(DWORD*)((uint8_t*)od + i * size);
+            if (ofs == 0x44 || ofs == 0x57 || ofs == 0x58) continue;
+            if (k != i) memmove((uint8_t*)od + k * size, (uint8_t*)od + i * size, size);
+            k++;
+        }
+        *n = k;
+    }
     /* The script's key events, after what the device had (DIDEVICEOBJECTDATA:
      * offset, data, time, sequence). Only removed when they are read. */
     if (dev == g_keyboard && n && od && size >= 16) {   /* a peek (DIGDD_PEEK) leaves them queued */
@@ -758,13 +795,18 @@ int main(int argc, char** argv) {
     char exe_full[MAX_PATH], game_full[MAX_PATH], guest_args[512] = "";
     int run = 0, sound = 0;
     setvbuf(stdout, NULL, _IONBF, 0);   /* a fault ends the run with TerminateProcess */
+    settings_load();   /* xwing.ini; the switches below override it */
     for (int i = 1; i < argc; i++) {
         int n = recomp_trace_arg(argc, argv, i);
         if (n) { i += n - 1; continue; }
         if (!strcmp(argv[i], "--run")) run = 1;
         else if (!strcmp(argv[i], "--sound")) sound = 1;
         else if (!strcmp(argv[i], "--headless")) g_headless = softdd_headless = 1;
-        else if (!strcmp(argv[i], "--fullscreen")) g_fullscreen = 1;
+        else if (!strcmp(argv[i], "--fullscreen")) g_gpu.fullscreen = 1;   /* borderless (F11) */
+        else if (!strcmp(argv[i], "--windowed")) g_gpu.fullscreen = 0;
+        else if (!strcmp(argv[i], "--software-3d")) g_hw3d = 0;
+        else if (!strcmp(argv[i], "--dump-textures")) g_gpu.dump_textures = 1;
+        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) softdd_scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sample")) g_sample = 1;
         else if (!strcmp(argv[i], "--shot") && i + 2 < argc && g_shots < 16) {
             g_shot_s[g_shots] = strtoul(argv[++i], NULL, 0);
@@ -807,6 +849,7 @@ int main(int argc, char** argv) {
     }
     /* The game opens its data relative to its working directory. */
     if (!SetCurrentDirectoryA(game_full)) { fprintf(stderr, "cannot enter %s\n", game_full); return 1; }
+    settings_apply_prefs();
     CoInitialize(NULL);
     int m = sound ? 1 : mute_process();
     if (!m) {

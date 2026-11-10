@@ -31,9 +31,11 @@
 #include <string.h>
 
 #include "softdd.h"
+#include "softdd_int.h"
+#include "gpu.h"
 
 int         softdd_headless;
-int         softdd_scale = 1;
+int         softdd_scale = 0;   /* --scale N; 0: fit the screen */
 const char* softdd_record;               /* --record out.mp4, or NULL */
 int         softdd_stop_after;           /* --frames N: exit after N presents */
 volatile LONG softdd_frames;
@@ -43,39 +45,6 @@ void (*softdd_on_present)(const uint8_t* bits, int w, int h, int pitch, long fra
     fprintf(stderr, "[softdd] unimplemented: %s\n", what); } while (0)
 
 /* ------------------------------------------------------------- objects */
-
-typedef struct Surf {
-    IDirectDrawSurfaceVtbl* lpVtbl;
-    IDirectDrawSurface3Vtbl* v3;         /* the same object as IDirectDrawSurface2/3 */
-    LONG      refs;
-    DWORD     caps;
-    int       w, h, pitch, bpp;
-    uint8_t*  bits;
-    HBITMAP   hbm;
-    HDC       hdc;                       /* lazily, for GetDC */
-    struct Surf* back;                   /* primary -> its back buffer */
-    DWORD     ck_lo, ck_hi;
-    int       has_ck;
-    IDirectDrawPalette* pal;
-    IDirectDrawClipper* clip;
-} Surf;
-
-typedef struct {
-    IDirectDrawVtbl* lpVtbl;
-    IDirectDraw2Vtbl* v2;                /* the same object as IDirectDraw2 */
-    LONG  refs;
-    HWND  hwnd;
-    DWORD coop;
-    int   w, h, bpp;
-    Surf* primary;
-} DD;
-
-typedef struct {
-    IDirectDrawPaletteVtbl* lpVtbl;
-    LONG refs;
-    DWORD caps;
-    PALETTEENTRY e[256];
-} Pal;
 
 typedef struct {
     IDirectDrawClipperVtbl* lpVtbl;
@@ -96,12 +65,16 @@ static struct Surf* as_surf(void* p) {
     if (!p) return NULL;
     if (*(void**)p == &surf_vt) return (struct Surf*)p;
     if (*(void**)p == &surf3_vt) return (struct Surf*)((void**)p - 1);
+    if (*(void**)p == &d3d_texture_vt) return (struct Surf*)((void**)p - 2);
     fprintf(stderr, "[softdd] a surface that is not ours: %p\n", p);
     return NULL;
 }
 
 static DD* g_dd;
+Surf* softdd_surf(void* iface) { return as_surf(iface); }
+DD* softdd_dd(void) { return g_dd; }
 static int g_bpp = 16;                   /* the display mode's depth: new surfaces get it */
+static const DDPIXELFORMAT* g_new_fmt;   /* CreateSurface's own format, for the next surf_new */
 
 static void pixfmt_bpp(DDPIXELFORMAT* pf, int bpp) {
     memset(pf, 0, sizeof *pf);
@@ -153,7 +126,20 @@ static BITMAPINFO* bmi8(int w, int h) {
     }
     return (BITMAPINFO*)&b;
 }
-static BITMAPINFO* bmi_of(Surf* s) { return s->bpp == 8 ? bmi8(s->w, s->h) : bmi565(s->w, s->h); }
+static BITMAPINFO* bmi_of(Surf* s) {
+    if (s->bpp == 32) { static BITMAPINFOHEADER b; b.biSize = sizeof b; b.biWidth = s->w; b.biHeight = -s->h;
+                        b.biPlanes = 1; b.biBitCount = 32; return (BITMAPINFO*)&b; }
+    return s->bpp == 8 ? bmi8(s->w, s->h) : bmi565(s->w, s->h);
+}
+static void surf_pixfmt(Surf* s, DDPIXELFORMAT* pf) {
+    pixfmt_bpp(pf, s->bpp == 8 ? 8 : 16);
+    if (s->bpp != 8) {
+        pf->dwRGBBitCount = s->bpp;
+        pf->dwRBitMask = s->rmask, pf->dwGBitMask = s->gmask, pf->dwBBitMask = s->bmask;
+        pf->dwRGBAlphaBitMask = s->amask;
+        if (s->amask) pf->dwFlags |= DDPF_ALPHAPIXELS;
+    }
+}
 
 static Surf* surf_new(int w, int h, DWORD caps) {
     Surf* s = (Surf*)calloc(1, sizeof *s);
@@ -163,7 +149,15 @@ static Surf* surf_new(int w, int h, DWORD caps) {
     s->caps = caps;
     s->w = w;
     s->h = h;
+    s->tex = &d3d_texture_vt;
     s->bpp = g_bpp;
+    if (s->bpp == 16) s->rmask = 0xF800, s->gmask = 0x07E0, s->bmask = 0x001F;
+    if (g_new_fmt && g_new_fmt->dwRGBBitCount) {
+        s->bpp = (int)g_new_fmt->dwRGBBitCount;
+        s->rmask = g_new_fmt->dwRBitMask, s->gmask = g_new_fmt->dwGBitMask, s->bmask = g_new_fmt->dwBBitMask;
+        s->amask = (g_new_fmt->dwFlags & DDPF_ALPHAPIXELS) ? g_new_fmt->dwRGBAlphaBitMask : 0;
+        if (g_new_fmt->dwFlags & DDPF_PALETTEINDEXED8) s->bpp = 8;
+    }
     s->pitch = (w * (s->bpp / 8) + 3) & ~3;
     s->hbm = CreateDIBSection(NULL, bmi_of(s), DIB_RGB_COLORS, (void**)&s->bits, NULL, 0);
     if (!s->hbm) { fprintf(stderr, "[softdd] CreateDIBSection %dx%d failed\n", w, h); exit(5); }
@@ -212,6 +206,14 @@ static void record_frame(Surf* s) {
 static volatile LONG g_shot_due;
 static char g_shot_path[MAX_PATH];
 void softdd_shot(const char* path) {
+    if (gpu_ready()) {   /* the picture as shown: .png beside the asked name */
+        char png[MAX_PATH];
+        lstrcpynA(png, path, MAX_PATH - 4);
+        char* dot = strrchr(png, '.');
+        if (dot && !_stricmp(dot, ".bmp")) strcpy(dot, ".png");
+        gpu_shot(png);
+        return;
+    }
     lstrcpynA(g_shot_path, path, MAX_PATH);
     InterlockedExchange(&g_shot_due, 1);
 }
@@ -238,7 +240,11 @@ static void present(Surf* s) {
         if (!g_rec) record_open(s->w, s->h);
         record_frame(s);
     }
-    if (!softdd_headless && g_dd && g_dd->hwnd) {
+    if (!softdd_headless && g_dd && g_dd->hwnd && (gpu_ready() || gpu_init(g_dd->hwnd))) {
+        gpu_frame_2d(s->bits, s->w, s->h, s->pitch, s->bpp, screen_palette(), d3d_active() ? (int)KEY16 : -1);
+        gpu_present();
+        d3d_frame_done();
+    } else if (!softdd_headless && g_dd && g_dd->hwnd) {
         RECT rc;
         HDC dc = GetDC(g_dd->hwnd);
         GetClientRect(g_dd->hwnd, &rc);
@@ -264,9 +270,16 @@ static void maybe_present(Surf* s) {
  * mode change. Windowed, it gets a caption and a client area of the mode
  * times --scale. */
 static void fit_window(DD* d) {
-    if (softdd_headless || !d->hwnd || !d->w) return;
-    RECT r = { 0, 0, d->w * softdd_scale, d->h * softdd_scale };
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
+    static int placed;
+    if (softdd_headless || !d->hwnd || !d->w || placed || g_gpu.fullscreen) return;
+    placed = 1;   /* once: after that the window is the player's to size */
+    RECT wa;
+    SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
+    /* --scale N: N times the mode; otherwise 85% of the screen height, at 4:3 */
+    int ch = softdd_scale > 0 ? d->h * softdd_scale : (wa.bottom - wa.top) * 85 / 100;
+    if (ch < d->h) ch = d->h;
+    RECT r = { 0, 0, ch * d->w / d->h, ch };
+    DWORD style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
     SetWindowLongA(d->hwnd, GWL_STYLE, style);
     SetWindowLongA(d->hwnd, GWL_EXSTYLE, 0);
     AdjustWindowRect(&r, style, FALSE);
@@ -375,6 +388,14 @@ static HRESULT WINAPI s_QueryInterface(IDirectDrawSurface* This, REFIID riid, LP
         *out = This;
         return S_OK;
     }
+    if (IsEqualGUID(riid, &IID_IDirect3DTexture)) {
+        SELF->refs++;
+        *out = &SELF->tex;
+        return S_OK;
+    }
+    if (IsEqualGUID(riid, &IID_IDirect3DHALDevice) || IsEqualGUID(riid, &IID_IDirect3DRGBDevice)
+        || IsEqualGUID(riid, &IID_IDirect3DRampDevice) || IsEqualGUID(riid, &IID_IDirect3DMMXDevice))
+        return d3d_device_create(SELF, out);
     if (IsEqualGUID(riid, &IID_IDirectDrawSurface2) || IsEqualGUID(riid, &IID_IDirectDrawSurface3)) {
         SELF->refs++;
         *out = &SELF->v3;
@@ -395,7 +416,11 @@ static ULONG WINAPI s_Release(IDirectDrawSurface* This) {
     return n;
 }
 static HRESULT WINAPI s_AddAttachedSurface(IDirectDrawSurface* This, LPDIRECTDRAWSURFACE a) {
-    (void)This; (void)a; UNIMPL("Surface::AddAttachedSurface"); return DDERR_UNSUPPORTED;
+    Surf* z = as_surf(a);
+    if (!z || !(z->caps & DDSCAPS_ZBUFFER)) { UNIMPL("Surface::AddAttachedSurface (not a z-buffer)"); return DDERR_UNSUPPORTED; }
+    z->refs++;
+    SELF->zbuf = z;   /* the depth is gpu.c's own; this only keeps the game's bookkeeping */
+    return DD_OK;
 }
 static HRESULT WINAPI s_AddOverlayDirtyRect(IDirectDrawSurface* This, LPRECT r) {
     (void)This; (void)r; return DDERR_UNSUPPORTED;
@@ -416,6 +441,7 @@ static HRESULT WINAPI s_Blt(IDirectDrawSurface* This, LPRECT dr, LPDIRECTDRAWSUR
     } else {
         fprintf(stderr, "[softdd] Blt flags 0x%lX with no source\n", flags);
     }
+    SELF->version++;
     maybe_present(SELF);
     return DD_OK;
 }
@@ -428,6 +454,7 @@ static HRESULT WINAPI s_BltFast(IDirectDrawSurface* This, DWORD x, DWORD y, LPDI
     RECT r = sr ? *sr : full(s);
     RECT d = { (LONG)x, (LONG)y, (LONG)x + (r.right - r.left), (LONG)y + (r.bottom - r.top) };
     blit(SELF, d, s, r, (trans & DDBLTFAST_SRCCOLORKEY) && s->has_ck, s->ck_lo, s->ck_hi);
+    SELF->version++;
     maybe_present(SELF);
     return DD_OK;
 }
@@ -457,6 +484,17 @@ static HRESULT WINAPI s_GetAttachedSurface(IDirectDrawSurface* This, LPDDSCAPS c
     if (SELF->back && (caps->dwCaps & DDSCAPS_BACKBUFFER)) {
         SELF->back->refs++;
         *out = (LPDIRECTDRAWSURFACE)SELF->back;
+        return DD_OK;
+    }
+    if (caps->dwCaps & DDSCAPS_ZBUFFER) {   /* the depth is gpu.c's; this is the game's handle on it */
+        if (!SELF->zbuf) {
+            static const DDPIXELFORMAT z16 = { sizeof(DDPIXELFORMAT), DDPF_ZBUFFER, 0, { 16 } };
+            g_new_fmt = &z16;
+            SELF->zbuf = surf_new(SELF->w, SELF->h, DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY);
+            g_new_fmt = NULL;
+        }
+        SELF->zbuf->refs++;
+        *out = (LPDIRECTDRAWSURFACE)SELF->zbuf;
         return DD_OK;
     }
     fprintf(stderr, "[softdd] GetAttachedSurface caps 0x%lX: none\n", caps->dwCaps);
@@ -492,7 +530,7 @@ static HRESULT WINAPI s_GetPalette(IDirectDrawSurface* This, LPDIRECTDRAWPALETTE
 }
 static HRESULT WINAPI s_GetPixelFormat(IDirectDrawSurface* This, LPDDPIXELFORMAT pf) {
     (void)This;
-    pixfmt_bpp(pf, SELF->bpp);
+    surf_pixfmt(SELF, pf);
     return DD_OK;
 }
 static void fill_desc(Surf* s, LPDDSURFACEDESC d) {
@@ -505,7 +543,7 @@ static void fill_desc(Surf* s, LPDDSURFACEDESC d) {
     d->lPitch = s->pitch;
     d->ddsCaps.dwCaps = s->caps;
     if (s->back) { d->dwFlags |= DDSD_BACKBUFFERCOUNT; d->dwBackBufferCount = 1; }
-    pixfmt_bpp(&d->ddpfPixelFormat, s->bpp);
+    surf_pixfmt(s, &d->ddpfPixelFormat);
 }
 static HRESULT WINAPI s_GetSurfaceDesc(IDirectDrawSurface* This, LPDDSURFACEDESC d) {
     fill_desc(SELF, d);
@@ -551,6 +589,7 @@ static HRESULT WINAPI s_SetPalette(IDirectDrawSurface* This, LPDIRECTDRAWPALETTE
 }
 static HRESULT WINAPI s_Unlock(IDirectDrawSurface* This, LPVOID p) {
     (void)p;
+    SELF->version++;
     maybe_present(SELF);
     return DD_OK;
 }
@@ -647,6 +686,7 @@ static HRESULT WINAPI d_QueryInterface(IDirectDraw* This, REFIID riid, LPVOID* o
         *out = &SELF->v2;
         return S_OK;
     }
+    if (IsEqualGUID(riid, &IID_IDirect3D)) return d3d_create(out);
     fprintf(stderr, "[softdd] DirectDraw::QueryInterface {%08lX-...} refused\n", riid->Data1);
     *out = NULL;
     return E_NOINTERFACE;
@@ -693,11 +733,14 @@ static HRESULT WINAPI d_CreateSurface(IDirectDraw* This, LPDDSURFACEDESC d, LPDI
             fprintf(stderr, "[softdd] CreateSurface flags 0x%lX caps 0x%lX: no size\n", d->dwFlags, caps);
             return DDERR_INVALIDPARAMS;
         }
-        if ((d->dwFlags & DDSD_PIXELFORMAT) && (int)d->ddpfPixelFormat.dwRGBBitCount != g_bpp)
+        if ((d->dwFlags & DDSD_PIXELFORMAT) && !(caps & DDSCAPS_TEXTURE) && (int)d->ddpfPixelFormat.dwRGBBitCount != g_bpp)
             fprintf(stderr, "[softdd] CreateSurface asks %lu bpp; made %d\n",
                     d->ddpfPixelFormat.dwRGBBitCount, g_bpp);
         if (!(caps & DDSCAPS_SYSTEMMEMORY)) caps |= DDSCAPS_VIDEOMEMORY;
-        s = surf_new((int)d->dwWidth, (int)d->dwHeight, caps | DDSCAPS_OFFSCREENPLAIN);
+        static const DDPIXELFORMAT z16 = { sizeof(DDPIXELFORMAT), DDPF_ZBUFFER, 0, { 16 } };
+        g_new_fmt = (caps & DDSCAPS_ZBUFFER) ? &z16 : (d->dwFlags & DDSD_PIXELFORMAT) ? &d->ddpfPixelFormat : NULL;
+        s = surf_new((int)d->dwWidth, (int)d->dwHeight, caps | ((caps & (DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER)) ? 0 : DDSCAPS_OFFSCREENPLAIN));
+        g_new_fmt = NULL;
     }
     if (d->dwFlags & DDSD_CKSRCBLT) {
         s->has_ck = 1;

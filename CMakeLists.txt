@@ -29,6 +29,9 @@ endif()
 add_executable(xwing
   src/runtime/host.c
   src/runtime/softdd.c
+  src/runtime/gpu.c
+  src/runtime/d3d.c
+  src/runtime/settings.c
   ${PCRECOMP}/runtime/native32/native32.c
   ${PCRECOMP}/runtime/recomp32/image_loader.c
   ${PCRECOMP}/runtime/recomp32/recomp_trace.c
@@ -45,7 +48,7 @@ target_link_options(xwing PRIVATE /BASE:0x60000000 /FIXED:NO /DYNAMICBASE:NO
 set(GEN_OPT "/O2" CACHE STRING "optimisation for the generated C")
 set_source_files_properties(${GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "/w;${GEN_OPT}")
 set_source_files_properties(src/runtime/host.c PROPERTIES COMPILE_OPTIONS "/W3")
-target_link_libraries(xwing PRIVATE user32 gdi32 kernel32 ole32 uuid dxguid winmm ws2_32 dinput8 shlwapi)
+target_link_libraries(xwing PRIVATE user32 gdi32 kernel32 ole32 uuid dxguid winmm ws2_32 dinput8 shlwapi d3d11 dxgi windowscodecs xinput)
 
 option(XW_TRACE "record a ring buffer of lifted function entries" OFF)
 if(XW_TRACE)
