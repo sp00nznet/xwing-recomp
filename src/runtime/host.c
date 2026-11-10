@@ -31,6 +31,7 @@
 #include "softdd.h"
 #include "gpu.h"
 #include "settings.h"
+#include "flight.h"
 
 extern const uint32_t xw_entry_va;  /* recomp_dispatch.c */
 
@@ -208,9 +209,28 @@ static char g_wait_file[64];
 static HANDLE g_file_seen;
 
 /* The game's file opens, logged: the milestones a run is read by. */
+/* Mods: a file at the same relative path under mods\files replaces the
+ * game's, for reading (ship models, resources, missions). The game's copy is
+ * never changed. */
+static const char* mod_path(const char* name, char* out, size_t n) {
+    if (!g_mods || !name || name[0] == '\\' || strchr(name, ':')) return name;
+    while (name[0] == '.' && (name[1] == '\\' || name[1] == '/')) {
+        name += 2;
+        while (*name == '\\' || *name == '/') name++;
+    }
+    _snprintf(out, n - 1, "mods\\files\\%s", name);
+    out[n - 1] = 0;
+    if (GetFileAttributesA(out) == INVALID_FILE_ATTRIBUTES) return NULL;
+    return out;
+}
+
 static void shim_CreateFileA(void) {
-    char buf[MAX_PATH * 2];
+    char buf[MAX_PATH * 2], mod[MAX_PATH * 2];
     const char* name = cd_path((const char*)(uintptr_t)ARG(0), buf, sizeof buf);
+    if (!(ARG(1) & GENERIC_WRITE)) {
+        const char* m = mod_path(name, mod, sizeof mod);
+        if (m && m != name) { printf("[mods] %s\n", m); name = m; }
+    }
     g_eax = (uint32_t)(uintptr_t)CreateFileA(name, ARG(1), ARG(2), (LPSECURITY_ATTRIBUTES)(uintptr_t)ARG(3),
                                              ARG(4), ARG(5), (HANDLE)(uintptr_t)ARG(6));
     printf("[host] open %s -> %s\n", name ? name : "(null)",
@@ -376,9 +396,7 @@ static void shim_joyGetPosEx(void) {
         DWORD size = j->dwSize, flags = j->dwFlags;
         memset(j, 0, size < sizeof *j ? size : sizeof *j);
         j->dwSize = size; j->dwFlags = flags;
-        j->dwXpos = j->dwYpos = j->dwRpos = 0x7FFF;
-        j->dwZpos = 0x7FFF;
-        j->dwPOV = JOY_POVCENTERED;
+        flight_joystick(g_game_wnd, g_scripted, j);
         g_eax = JOYERR_NOERROR;
     }
     g_esp += 4 + 2 * 4;
@@ -454,6 +472,17 @@ static void parse_keys(const char* spec) {
             continue;
         }
         if (!strncmp(what, "shot=", 5)) { GetFullPathNameA(what + 5, MAX_PATH, st.shot, NULL); g_steps[g_nsteps++] = st; continue; }
+        if (!strncmp(what, "stick:", 6)) {
+            st.move = 2;
+            sscanf(what + 6, "%d:%d", &st.x, &st.y);
+            g_steps[g_nsteps++] = st;
+            continue;
+        }
+        if (!strcmp(what, "fire") || !strcmp(what, "nofire")) {
+            st.move = 3, st.click = what[0] == 'f';
+            g_steps[g_nsteps++] = st;
+            continue;
+        }
         if (!strncmp(what, "click:", 6) || !strncmp(what, "move:", 5)) {
             st.click = what[0] == 'c';
             st.move = 1;
@@ -488,6 +517,13 @@ static DWORD WINAPI keys_thread(LPVOID unused) {
         DWORD at = t0 + st->at, now = GetTickCount();
         if ((int)(at - now) > 0) Sleep(at - now);
         if (st->shot[0]) { softdd_shot(st->shot); continue; }
+        if (st->move >= 2) {   /* the virtual joystick (flight.c) */
+            static int sx, sy, fire;
+            if (st->move == 2) sx = st->x, sy = st->y; else fire = st->click;
+            flight_script(sx, sy, fire);
+            printf("[keys] %.1fs stick %d,%d fire %d\n", st->at / 1000.0, sx, sy, fire);
+            continue;
+        }
         HWND w = g_game_wnd;
         if (st->move) {
             g_cur_x = st->x, g_cur_y = st->y;

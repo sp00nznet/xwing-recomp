@@ -34,7 +34,7 @@
 
 #include "gpu.h"
 
-gpu_settings g_gpu = { GPU_SHARP, 1, 0, 1, 1, 0, 4 };
+gpu_settings g_gpu = { GPU_SHARP, 1, 0, 0, 1, 0, 4 };   /* widescreen off: Hor+ needs the flight projection (ROADMAP) */
 const char* const gpu_mode_names[GPU_NMODES] = { "sharp", "smooth", "crt", "nearest", "integer" };
 
 #define GW 640
@@ -415,6 +415,8 @@ void gpu_background(const uint8_t* bits, int w, int h, int pitch, int bpp, const
 
 /* ---- 3D --------------------------------------------------------------------------- */
 int gpu_scene_count(void) { return g_3d_draws; }
+static volatile LONG g_since3d = 1000;   /* presents since the last one with 3D */
+int gpu_in_flight(void) { return g_since3d < 30; }
 
 static void set_3d_target(void) {
     D3D11_VIEWPORT vp = { 0, 0, (float)g_3d_w, (float)g_3d_h, 0, 1 };
@@ -737,6 +739,7 @@ void gpu_present(void) {
     IDXGISwapChain_Present(g_sc, 0, 0);   /* the game paces itself (vblank, timers); a vsync wait per palette fade stalled its loading */
     {   static long frames, draws3d, frames3d;
         frames++, draws3d += g_3d_draws, frames3d += g_3d_draws > 0;
+        g_since3d = g_3d_draws > 0 ? 0 : g_since3d + 1;
         if (frames % 600 == 0) {
             int nt = 0;
             for (int i = 1; i < 4096; i++) nt += g_tex[i].srv != NULL;

@@ -32,6 +32,7 @@ add_executable(xwing
   src/runtime/gpu.c
   src/runtime/d3d.c
   src/runtime/settings.c
+  src/runtime/flight.c
   ${PCRECOMP}/runtime/native32/native32.c
   ${PCRECOMP}/runtime/recomp32/image_loader.c
   ${PCRECOMP}/runtime/recomp32/recomp_trace.c

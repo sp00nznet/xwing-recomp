@@ -70,7 +70,6 @@ void settings_menu(HWND w, int x, int y) {
     AppendMenuA(m, MF_POPUP, (UINT_PTR)sc, "Scaling (F12)");
     AppendMenuA(m, MF_POPUP, (UINT_PTR)tf, "Texture filtering");
     AppendMenuA(m, MF_POPUP, (UINT_PTR)aa, "Antialiasing");
-    AppendMenuA(m, MF_STRING | (g_gpu.widescreen ? MF_CHECKED : 0), M_WIDE, "Widescreen 3D");
     AppendMenuA(m, MF_STRING | (g_gpu.hd_textures ? MF_CHECKED : 0), M_HD, "HD textures (mods\\textures)");
     AppendMenuA(m, MF_STRING | (g_gpu.dump_textures ? MF_CHECKED : 0), M_DUMP, "Dump textures (mods\\dump)");
     AppendMenuA(m, MF_STRING | (g_mods ? MF_CHECKED : 0), M_MODS, "Mod files (mods\\files)");

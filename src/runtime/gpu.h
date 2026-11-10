@@ -49,6 +49,7 @@ void gpu_background(const uint8_t* bits, int w, int h, int pitch, int bpp, const
 void gpu_clear(int x0, int y0, int x1, int y1, int target, uint32_t color, int zbuffer, float z);
 void gpu_draw(const gpu_vertex* v, int nv, const uint16_t* idx, int ni, const gpu_state* st);
 int  gpu_scene_count(void);         /* 3D draws since the last present */
+int  gpu_in_flight(void);           /* the 3D has been on screen in the last half second or so */
 
 /* A texture, cached by (key, version). fmt: bpp 8 (pal), or 16/32 with masks. */
 typedef struct { int bpp; uint32_t r, g, b, a; const PALETTEENTRY* pal; int has_ck; uint32_t ck; } gpu_fmt;
