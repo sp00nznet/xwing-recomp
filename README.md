@@ -6,6 +6,8 @@ lifted to C by pcrecomp and runs on its native32 runtime, with a remaster
 on top: its own Direct3D 11 window, the 3D drawn at your screen's
 resolution, HD texture packs, mod files, and flying with a pad or the mouse.
 
+![Flying in the remaster: Direct3D 11 at the window's resolution](docs/screenshots/hero.gif)
+
 You supply your own copy of the game. Nothing from it is in this repo.
 
 ## Status

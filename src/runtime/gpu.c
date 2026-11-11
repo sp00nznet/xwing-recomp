@@ -664,6 +664,7 @@ int gpu_texture(const void* key, uint32_t version, const uint8_t* bits, int w, i
 
 /* ---- present ------------------------------------------------------------------- */
 void gpu_shot(const char* path) {
+    for (int i = 0; g_shot_due && i < 200; i++) Sleep(5);   /* one at a time: a burst keeps every frame */
     lstrcpynA(g_shot_path, path, MAX_PATH);
     InterlockedExchange(&g_shot_due, 1);
 }

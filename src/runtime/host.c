@@ -419,7 +419,7 @@ static void shim_DirectDrawCreate(void) {
  * real keyboard and mouse are not read: only the script reaches the game. */
 typedef struct { DWORD at; int dik, vk, x, y, click, move; char on[64], shot[MAX_PATH]; } step_t;
 
-static step_t g_steps[128];
+static step_t g_steps[512];
 static int g_nsteps, g_scripted;
 static volatile DWORD g_key_until[256];      /* DIK code -> tick it is held until */
 static volatile DWORD g_vk_until[256];       /* the same, by virtual key */
@@ -459,9 +459,9 @@ static int key_by_name(const char* n, int* vk) {
 }
 
 static void parse_keys(const char* spec) {
-    char buf[4096];
+    static char buf[32768];
     lstrcpynA(buf, spec, sizeof buf);
-    for (char* tok = strtok(buf, ","); tok && g_nsteps < 128; tok = strtok(NULL, ",")) {
+    for (char* tok = strtok(buf, ","); tok && g_nsteps < 512; tok = strtok(NULL, ",")) {
         step_t st = { 0 };
         char* c = strchr(tok, ':');
         if (!c) continue;
