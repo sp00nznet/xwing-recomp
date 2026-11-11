@@ -88,8 +88,11 @@ static HRESULT WINAPI vp_SetBgDepth(void* t, LPDIRECTDRAWSURFACE s) { (void)t; (
 static HRESULT WINAPI vp_GetBgDepth(void* t, LPDIRECTDRAWSURFACE* s, LPBOOL v) { (void)t; *s = NULL; *v = FALSE; return DD_OK; }
 /* Clear: the 3D target (gpu), and the rectangles in the render target become
  * KEY16, so only what the game draws over the 3D afterwards stays opaque. */
+static int g_cleared;   /* this frame: 1 target, 2 z-buffer */
 static HRESULT WINAPI vp_Clear(void* t, DWORD n, LPD3DRECT r, DWORD flags) {
     VP* v = (VP*)t;
+    if (flags & D3DCLEAR_TARGET) g_cleared |= 1;
+    if (flags & D3DCLEAR_ZBUFFER) g_cleared |= 2;
     Surf* s = v->dev ? v->dev->target : NULL;
     for (DWORD i = 0; i < n; i++) {
         gpu_clear(r[i].x1, r[i].y1, r[i].x2, r[i].y2, flags & D3DCLEAR_TARGET, v->bg, flags & D3DCLEAR_ZBUFFER, v->z);
@@ -334,10 +337,15 @@ static HRESULT WINAPI dev_GetStats(void* t, LPD3DSTATS s) { (void)t; DWORD n = s
  * the render target holds the first: it goes under the 3D (gpu_background),
  * and the target becomes KEY16, so only what is drawn after the 3D covers it. */
 static int g_frame_open;
-void d3d_frame_done(void) { g_frame_open = 0; }
+void d3d_frame_done(void) { g_frame_open = 0; g_cleared = 0; }
 static void open_frame(Surf* s) {
     if (g_frame_open || !s || s->bpp != 16) return;
     g_frame_open = 1;
+    /* XvT never clears through the viewport (its depth test is LESS, and a
+     * card of the day began each frame cleared): what the game did not clear
+     * starts the frame clear, the depth at the far plane. */
+    if ((g_cleared & 3) != 3)
+        gpu_clear(0, 0, s->w, s->h, !(g_cleared & 1), 0, !(g_cleared & 2), 1.0f);
     gpu_background(s->bits, s->w, s->h, s->pitch, s->bpp, NULL);
     for (int y = 0; y < s->h; y++) {
         uint16_t* p = (uint16_t*)(s->bits + (size_t)y * s->pitch);

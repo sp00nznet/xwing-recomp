@@ -60,6 +60,7 @@ int  gpu_texture(const void* key, uint32_t version, const uint8_t* bits, int w, 
 int  gpu_to_game(POINT* p);
 void gpu_from_game(POINT* p);   /* and back */
 /* Write the next presented frame (as shown) to path. */
+int gpu_shot_pending(void);
 void gpu_shot(const char* path);
 /* Hor+: how much wider than 4:3 the 3D view is (1.0 = 4:3). */
 float gpu_aspect_gain(void);

@@ -205,6 +205,7 @@ static void record_frame(Surf* s) {
 /* --shot: the front buffer as it is presented, never the screen. */
 static volatile LONG g_shot_due;
 static char g_shot_path[MAX_PATH];
+static void present(Surf* s);
 void softdd_shot(const char* path) {
     if (gpu_ready()) {   /* the picture as shown: .png beside the asked name */
         char png[MAX_PATH];
@@ -212,6 +213,10 @@ void softdd_shot(const char* path) {
         char* dot = strrchr(png, '.');
         if (dot && !_stricmp(dot, ".bmp")) strcpy(dot, ".png");
         gpu_shot(png);
+        /* A still screen presents nothing (a menu waiting for input): take it
+         * as it stands. */
+        for (int i = 0; i < 30 && gpu_shot_pending(); i++) Sleep(10);
+        if (gpu_shot_pending() && g_dd && g_dd->primary) present(g_dd->primary);
         return;
     }
     lstrcpynA(g_shot_path, path, MAX_PATH);

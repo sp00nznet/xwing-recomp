@@ -124,6 +124,17 @@ static void shim_OutputDebugStringA(void) {
     g_esp += 4 + 1 * 4;
 }
 
+/* SuspendThread keeps the machine lock. A native call gives the lock up, so
+ * the target could be caught in lifted code holding it, and the caller then
+ * waits for it for ever: XvT's movie player suspends its decoder thread
+ * around every frame, and the intro hung on its first. With the lock held
+ * here the target is waiting for it or in a native call, as only one thread
+ * at a time runs the game's code. */
+static void shim_SuspendThread(void) {
+    g_eax = SuspendThread((HANDLE)(uintptr_t)ARG(0));
+    g_esp += 4 + 1 * 4;
+}
+
 /* The game ends itself with ExitProcess, which skips the host's way out. */
 static void shim_ExitProcess(void) {
     UINT code = ARG(0);
@@ -752,6 +763,7 @@ static void shim_LoadCursorA(void) {
 }
 
 static native32_shim_t g_shims[] = {
+    { "SuspendThread", shim_SuspendThread },
     { "LoadIconA", shim_LoadIconA },
     { "LoadCursorA", shim_LoadCursorA },
     { "DirectSoundCreate", shim_DirectSoundCreate },
