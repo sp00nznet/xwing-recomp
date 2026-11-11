@@ -722,8 +722,13 @@ static void shim_mciSendCommandA(void) {
     typedef MCIERROR (WINAPI *mci_t)(MCIDEVICEID, UINT, DWORD_PTR, DWORD_PTR);
     static mci_t mci;
     if (!mci) mci = (mci_t)GetProcAddress(GetModuleHandleA("music.dll"), "mciSendCommandA");
+    /* One call at a time: the Steam edition's music DLL is not thread-safe,
+     * and with the machine lock released two game threads could meet in it
+     * (X-Wing vs TIE Fighter corrupted the heap there, about one run in four). */
+    static SRWLOCK one = SRWLOCK_INIT;
     MCIERROR r;
-    UNLOCKED(r = mci(ARG(0), ARG(1), ARG(2), ARG(3)));
+    DWORD a0 = ARG(0), a1 = ARG(1), a2 = ARG(2), a3 = ARG(3);
+    UNLOCKED(AcquireSRWLockExclusive(&one); r = mci(a0, a1, a2, a3); ReleaseSRWLockExclusive(&one));
     if (g_sound_log) printf("[sound] mci %u msg %04X flags %08X -> %u\n", ARG(0), ARG(1), ARG(2), (unsigned)r);
     g_eax = r;
     g_esp += 4 + 4 * 4;
