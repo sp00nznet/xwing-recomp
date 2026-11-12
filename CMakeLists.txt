@@ -34,6 +34,7 @@ add_executable(xwing
   src/runtime/settings.c
   src/runtime/flight.c
   src/runtime/sound.c
+  src/runtime/music.c
   ${PCRECOMP}/runtime/native32/native32.c
   ${PCRECOMP}/runtime/recomp32/image_loader.c
   ${PCRECOMP}/runtime/recomp32/recomp_trace.c

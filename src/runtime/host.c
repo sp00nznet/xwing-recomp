@@ -33,6 +33,7 @@
 #include "settings.h"
 #include "flight.h"
 #include "sound.h"
+#include "music.h"
 
 extern const uint32_t xw_entry_va;  /* recomp_dispatch.c */
 
@@ -716,22 +717,18 @@ static void shim_DirectSoundCreate(void) {
     g_esp += 4 + 3 * 4;
 }
 
-/* MUSIC.dll's mciSendCommandA (the CD-audio tracks, which this edition
- * plays from XwingCD\music): logged, so a run says what music it asked for. */
+/* The CD music: the host's own player (music.c), not the Steam edition's
+ * MUSIC.dll, whose player thread raced the game's stop and play. */
 static void shim_mciSendCommandA(void) {
-    typedef MCIERROR (WINAPI *mci_t)(MCIDEVICEID, UINT, DWORD_PTR, DWORD_PTR);
-    static mci_t mci;
-    if (!mci) mci = (mci_t)GetProcAddress(GetModuleHandleA("music.dll"), "mciSendCommandA");
-    /* One call at a time: the Steam edition's music DLL is not thread-safe,
-     * and with the machine lock released two game threads could meet in it
-     * (X-Wing vs TIE Fighter corrupted the heap there, about one run in four). */
-    static SRWLOCK one = SRWLOCK_INIT;
-    MCIERROR r;
-    DWORD a0 = ARG(0), a1 = ARG(1), a2 = ARG(2), a3 = ARG(3);
-    UNLOCKED(AcquireSRWLockExclusive(&one); r = mci(a0, a1, a2, a3); ReleaseSRWLockExclusive(&one));
+    MCIERROR r = music_mci(ARG(0), ARG(1), ARG(2), ARG(3));
     if (g_sound_log) printf("[sound] mci %u msg %04X flags %08X -> %u\n", ARG(0), ARG(1), ARG(2), (unsigned)r);
     g_eax = r;
     g_esp += 4 + 4 * 4;
+}
+static void shim_auxSetVolume(void) {   /* the music volume, for the CD */
+    music_volume(ARG(1));
+    g_eax = 0;
+    g_esp += 4 + 2 * 4;
 }
 
 static DWORD WINAPI sound_thread(LPVOID unused) {
@@ -773,6 +770,7 @@ static native32_shim_t g_shims[] = {
     { "LoadCursorA", shim_LoadCursorA },
     { "DirectSoundCreate", shim_DirectSoundCreate },
     { "mciSendCommandA", shim_mciSendCommandA },
+    { "auxSetVolume", shim_auxSetVolume },
     { "GetCursorPos", shim_GetCursorPos },
     { "GetKeyboardState", shim_GetKeyboardState },
     { "SetCursorPos", shim_SetCursorPos },
