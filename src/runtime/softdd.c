@@ -150,6 +150,10 @@ static Surf* surf_new(int w, int h, DWORD caps) {
     s->w = w;
     s->h = h;
     s->tex = &d3d_texture_vt;
+    /* gpu.c caches textures by address and version: a new surface at a freed
+     * one's address must not match its cached picture. */
+    static uint32_t serial;
+    s->version = serial += 0x100000;
     s->bpp = g_bpp;
     if (s->bpp == 16) s->rmask = 0xF800, s->gmask = 0x07E0, s->bmask = 0x001F;
     if (g_new_fmt && g_new_fmt->dwRGBBitCount) {
